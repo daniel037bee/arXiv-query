@@ -7,7 +7,7 @@ import re
 from datetime import datetime, timedelta
 
 # === FILE PATHS ===
-BASE_DIR = '/home/daniel037bee/Desktop/Labwork/arXiv'
+BASE_DIR = '/mnt/d/USer/부산대학교/Lab/arXiv'
 os.makedirs(BASE_DIR, exist_ok=True)
 
 CACHE_FILE = os.path.join(BASE_DIR, 'arxiv_cache.json')
