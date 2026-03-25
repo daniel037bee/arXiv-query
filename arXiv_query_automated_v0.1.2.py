@@ -39,7 +39,7 @@ def fetch_and_cache_papers():
     
     query = 'cat:astro-ph.GA IGNORE cat:astro-ph.CO IGNORE cat:astro-ph.SR ANDNOT cat:astro-ph.EP'
     search_query = urllib.parse.quote(query)
-    url = f"http://export.arxiv.org/api/query?search_query={search_query}&start=0&max_results=50&sortBy=submittedDate&sortOrder=descending"
+    url = f"http://export.arxiv.org/api/query?search_query={search_query}&start=0&max_results=500&sortBy=submittedDate&sortOrder=descending"
     
     print("Checking arXiv for new papers...")
     
@@ -348,7 +348,7 @@ def generate_single_html(cache):
                 }}
                 if (queryStr.startsWith('ANDNOT')) {{ queryStr = 'all:astro-ph ' + queryStr; }}
 
-                const arxivUrl = `http://export.arxiv.org/api/query?search_query=${{encodeURIComponent(queryStr)}}&start=0&max_results=50&sortBy=submittedDate&sortOrder=descending`;
+                const arxivUrl = `http://export.arxiv.org/api/query?search_query=${{encodeURIComponent(queryStr)}}&start=0&max_results=500&sortBy=submittedDate&sortOrder=descending`;
                 const proxyUrl = `https://api.allorigins.win/raw?url=${{encodeURIComponent(arxivUrl)}}`;
                 
                 try {{
