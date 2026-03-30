@@ -1,9 +1,11 @@
 import urllib.request
 import urllib.parse
+import urllib.error
 import xml.etree.ElementTree as ET
 import json
 import os
 import re
+import time
 from datetime import datetime, timedelta
 
 # === FILE PATHS ===
@@ -21,6 +23,123 @@ DEFAULT_KEYWORDS = [
     "milky way"
 ]
 
+def fetch_oai_pmh_papers(cutoff_date):
+    """
+    Harvests metadata from the arXiv OAI-PMH endpoint.
+    Downloads the entire 'physics:astro-ph' set from the cutoff date, 
+    then filters for GA (and excludes EP) client-side.
+    """
+    base_url = "http://export.arxiv.org/oai2"
+    
+    # Initial request parameters
+    params = {
+        'verb': 'ListRecords',
+        'set': 'physics:astro-ph',
+        'metadataPrefix': 'arXiv',
+        'from': cutoff_date
+    }
+    
+    ns = {
+        'oai': 'http://www.openarchives.org/OAI/2.0/',
+        'arxiv': 'http://arxiv.org/OAI/arXiv/'
+    }
+    
+    new_papers = []
+    
+    while True:
+        query_string = urllib.parse.urlencode(params)
+        url = f"{base_url}?{query_string}"
+        print(f"Harvesting OAI-PMH page: {url}")
+        
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) arXiv-Dashboard-Bot/1.0'})
+        
+        try:
+            response = urllib.request.urlopen(req)
+            xml_data = response.read()
+        except urllib.error.HTTPError as e:
+            # OAI-PMH legally uses 503 with a Retry-After header for rate limiting
+            if e.code == 503: 
+                retry_after = int(e.headers.get('Retry-After', 10))
+                print(f"HTTP 503: Server requested backoff. Waiting {retry_after} seconds...")
+                time.sleep(retry_after)
+                continue
+            elif e.code == 429:
+                print("HTTP 429: Too many requests. Waiting 15 seconds...")
+                time.sleep(15)
+                continue
+            else:
+                print(f"HTTP Error {e.code}: {e.reason}")
+                break
+        except Exception as e:
+            print(f"Network error: {e}")
+            break
+
+        root = ET.fromstring(xml_data)
+        
+        # Check for OAI-level errors (e.g., noRecordsMatch)
+        error = root.find('oai:error', ns)
+        if error is not None:
+            if error.attrib.get('code') == 'noRecordsMatch':
+                print("No new records found for this date range.")
+            else:
+                print(f"OAI Error: {error.attrib.get('code')} - {error.text}")
+            break
+
+        records = root.findall('.//oai:record', ns)
+        for record in records:
+            # Skip deleted records
+            header = record.find('oai:header', ns)
+            if header is not None and header.attrib.get('status') == 'deleted':
+                continue
+                
+            metadata = record.find('oai:metadata/arxiv:arXiv', ns)
+            if metadata is None:
+                continue
+                
+            categories_text = metadata.find('arxiv:categories', ns).text or ""
+            categories = categories_text.split()
+            
+            # --- CUSTOM LOGIC: Include GA, Exclude EP ---
+            if 'astro-ph.GA' in categories and 'astro-ph.EP' not in categories:
+                paper_id = metadata.find('arxiv:id', ns).text
+                title = metadata.find('arxiv:title', ns).text.replace('\n', ' ').strip()
+                abstract = metadata.find('arxiv:abstract', ns).text.replace('\n', ' ').strip()
+                
+                # Parse authors (OAI-PMH structures forenames and keynames separately)
+                authors_list = []
+                for author in metadata.findall('arxiv:authors/arxiv:author', ns):
+                    keyname = author.find('arxiv:keyname', ns)
+                    forenames = author.find('arxiv:forenames', ns)
+                    name = ""
+                    if forenames is not None and forenames.text: name += forenames.text + " "
+                    if keyname is not None and keyname.text: name += keyname.text
+                    if name: authors_list.append(name.strip())
+                    
+                # Use the OAI datestamp (announcement date), NOT the original submission date
+                header = record.find('oai:header', ns)
+                datestamp_elem = header.find('oai:datestamp', ns)
+                published = datestamp_elem.text[:10] if datestamp_elem is not None else cutoff_date
+                    
+                new_papers.append({
+                    'id': f"http://arxiv.org/abs/{paper_id}",
+                    'title': title,
+                    'abstract': abstract,
+                    'authors': ', '.join(authors_list),
+                    'published': published
+                })
+
+        # Check for pagination (resumptionToken)
+        token_element = root.find('.//oai:resumptionToken', ns)
+        if token_element is not None and token_element.text:
+            token = token_element.text
+            # When using a resumption token, all other params MUST be omitted
+            params = {'verb': 'ListRecords', 'resumptionToken': token} 
+            time.sleep(5)  # Mandatory courtesy delay between pages
+        else:
+            break  # No more pages
+
+    return new_papers
+
 def fetch_and_cache_papers():
     if os.path.exists(CACHE_FILE):
         with open(CACHE_FILE, 'r', encoding='utf-8') as f:
@@ -28,7 +147,7 @@ def fetch_and_cache_papers():
     else:
         cache = []
         
-    # --- NEW: Erase papers older than 7 days from the cache ---
+    # --- Erase papers older than 7 days from the cache ---
     cutoff_date = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
     original_count = len(cache)
     cache = [paper for paper in cache if paper['published'] >= cutoff_date]
@@ -37,54 +156,22 @@ def fetch_and_cache_papers():
 
     known_ids = {paper['id'] for paper in cache}
     
-    query = 'cat:astro-ph.GA IGNORE cat:astro-ph.CO IGNORE cat:astro-ph.SR ANDNOT cat:astro-ph.EP'
-    search_query = urllib.parse.quote(query)
-    url = f"http://export.arxiv.org/api/query?search_query={search_query}&start=0&max_results=500&sortBy=submittedDate&sortOrder=descending"
+    print(f"Checking arXiv OAI-PMH for new astro-ph papers since {cutoff_date}...")
+    harvested_papers = fetch_oai_pmh_papers(cutoff_date)
     
-    print("Checking arXiv for new papers...")
+    # Filter against papers we already have in the cache
+    new_papers = [p for p in harvested_papers if p['id'] not in known_ids]
     
-    try:
-        response = urllib.request.urlopen(url)
-        xml_data = response.read()
-        root = ET.fromstring(xml_data)
-        namespace = {'atom': 'http://www.w3.org/2005/Atom'}
-        entries = root.findall('atom:entry', namespace)
+    if new_papers:
+        print(f"Found {len(new_papers)} new GA papers! Updating cache...")
+        cache.extend(new_papers)
         
-        new_papers = []
-        for entry in entries:
-            paper_id = entry.find('atom:id', namespace).text
-            if paper_id in known_ids:
-                continue 
-                
-            title = entry.find('atom:title', namespace).text.replace('\n', ' ').strip()
-            summary = entry.find('atom:summary', namespace).text.replace('\n', ' ').strip()
-            authors = [author.find('atom:name', namespace).text for author in entry.findall('atom:author', namespace)]
-            published = entry.find('atom:published', namespace).text
+    # Sort and save
+    cache.sort(key=lambda x: x['published'], reverse=True)
+    with open(CACHE_FILE, 'w', encoding='utf-8') as f:
+        json.dump(cache, f, indent=4)
             
-            # Only add the paper if it meets our 7-day cutoff (arXiv sometimes bumps old papers)
-            if published[:10] >= cutoff_date:
-                new_papers.append({
-                    'id': paper_id,
-                    'title': title,
-                    'abstract': summary,
-                    'authors': ', '.join(authors),
-                    'published': published[:10] 
-                })
-            
-        if new_papers:
-            print(f"Found {len(new_papers)} new papers! Updating cache...")
-            cache.extend(new_papers)
-            
-        # Always sort and save, even if no new papers, to ensure the old ones were purged
-        cache.sort(key=lambda x: x['published'], reverse=True)
-        with open(CACHE_FILE, 'w', encoding='utf-8') as f:
-            json.dump(cache, f, indent=4)
-                
-        return cache
-        
-    except Exception as e:
-        print(f"An error occurred: {e}")
-        return cache
+    return cache
 
 def generate_single_html(cache):
     print("Generating the single-page application...")
@@ -248,7 +335,7 @@ def generate_single_html(cache):
             <div class="paper" data-original-index="{index}">
                 <div class="match-badge">0 Matches</div>
                 <h2><a href="{paper['id']}" target="_blank">{paper['title']}</a></h2>
-                <div class="date">Published: {paper['published']}</div>
+                <div class="date">Announced: {paper['published']}</div>
                 <div class="authors">{paper['authors']}</div>
                 <div class="abstract">
                     <strong>Abstract:</strong> <span class="abstract-text"></span>
@@ -321,7 +408,9 @@ def generate_single_html(cache):
 
             // --- LIVE ARXIV QUERY LOGIC ---
             async function fetchLiveArxiv() {{
-                document.getElementById('loadingIndicator').style.display = 'block';
+                const loadingInd = document.getElementById('loadingIndicator');
+                loadingInd.style.display = 'block';
+                loadingInd.innerText = 'Fetching & Parsing from arXiv...';
                 
                 let included = [];
                 let excluded = [];
@@ -351,10 +440,56 @@ def generate_single_html(cache):
                 const arxivUrl = `http://export.arxiv.org/api/query?search_query=${{encodeURIComponent(queryStr)}}&start=0&max_results=500&sortBy=submittedDate&sortOrder=descending`;
                 const proxyUrl = `https://api.allorigins.win/raw?url=${{encodeURIComponent(arxivUrl)}}`;
                 
+                let maxRetries = 3;
+                let attempt = 0;
+                let xmlStr = null;
+                
+                while (attempt < maxRetries) {{
+                    try {{
+                        const response = await fetch(proxyUrl);
+                        
+                        // Handle HTTP-level rate limiting from the proxy/origin
+                        if (response.status === 429 || response.status === 503) {{
+                            attempt++;
+                            let waitTime = attempt * 10;
+                            loadingInd.innerText = `Rate limited by arXiv (HTTP ${{response.status}}). Retrying in ${{waitTime}}s...`;
+                            await new Promise(r => setTimeout(r, waitTime * 1000));
+                            continue;
+                        }}
+                        if (!response.ok) throw new Error(`HTTP error! status: ${{response.status}}`);
+                        
+                        xmlStr = await response.text();
+                        
+                        // Handle cases where AllOrigins returns 200 OK, but the text is an arXiv HTML error page
+                        if (xmlStr.includes('Retry-After') || xmlStr.includes('Too Many Requests') || !xmlStr.trim().startsWith('<')) {{
+                            attempt++;
+                            let waitTime = attempt * 10;
+                            loadingInd.innerText = `ArXiv rate limit detected in payload. Retrying in ${{waitTime}}s...`;
+                            await new Promise(r => setTimeout(r, waitTime * 1000));
+                            continue;
+                        }}
+                        
+                        break; // Success! Break out of the retry loop.
+                        
+                    }} catch(e) {{
+                        attempt++;
+                        if (attempt >= maxRetries) {{
+                            alert("Network error. Try again later. " + e);
+                            loadingInd.style.display = 'none';
+                            return;
+                        }}
+                        loadingInd.innerText = `Network error. Retrying... (${{attempt}}/${{maxRetries}})`;
+                        await new Promise(r => setTimeout(r, 5000));
+                    }}
+                }}
+                
+                if (!xmlStr) {{
+                    loadingInd.style.display = 'none';
+                    return;
+                }}
+                
                 try {{
-                    const response = await fetch(proxyUrl);
-                    const str = await response.text();
-                    const data = new window.DOMParser().parseFromString(str, "text/xml");
+                    const data = new window.DOMParser().parseFromString(xmlStr, "text/xml");
                     const entries = data.querySelectorAll("entry");
                     
                     const newPapers = [];
@@ -375,9 +510,10 @@ def generate_single_html(cache):
                     }}
                     
                 }} catch(e) {{
-                    alert("Network error. Try again later. " + e);
+                    alert("Error parsing the XML response. " + e);
                 }}
-                document.getElementById('loadingIndicator').style.display = 'none';
+                
+                loadingInd.style.display = 'none';
             }}
 
             function rebuildDOM(papers) {{
@@ -392,7 +528,7 @@ def generate_single_html(cache):
                     div.innerHTML = `
                         <div class="match-badge">0 Matches</div>
                         <h2><a href="${{paper.id}}" target="_blank">${{paper.title}}</a></h2>
-                        <div class="date">Published: ${{paper.published}}</div>
+                        <div class="date">Announced: ${{paper.published}}</div>
                         <div class="authors">${{paper.authors}}</div>
                         <div class="abstract">
                             <strong>Abstract:</strong> <span class="abstract-text"></span>
