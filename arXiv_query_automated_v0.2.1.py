@@ -7,20 +7,44 @@ import os
 import re
 import time
 from datetime import datetime, timedelta
+import argparse
 
-# === FILE PATHS ===
-BASE_DIR = '/mnt/d/USer/부산대학교/Lab/arXiv'
+# Set up argument parsing
+parser = argparse.ArgumentParser(description="Automated arXiv Query Script")
+parser.add_argument(
+    '--dir', 
+    type=str, 
+    default=None,  # Default to None so we can check if it was used
+    help='Base directory to save arXiv cache and HTML files.'
+)
+args = parser.parse_args()
+
+# Determine BASE_DIR based on the 3-tier fallback
+if args.dir:
+    # 1. Use command-line argument if provided
+    BASE_DIR = args.dir
+elif os.getenv('ARXIV_BASE_DIR'):
+    # 2. Use environment variable if provided
+    BASE_DIR = os.getenv('ARXIV_BASE_DIR')
+else:
+    # 3. Interactive prompt if nothing was provided
+    print("No directory specified via command line or environment variable.")
+    user_input = input("Enter the path to save arXiv data (or press Enter to use './arXiv_data'): ").strip()
+    # Use the user's input, or default to './arXiv_data' if they just pressed Enter
+    BASE_DIR = user_input if user_input else './arXiv_data'
+
 os.makedirs(BASE_DIR, exist_ok=True)
 
 CACHE_FILE = os.path.join(BASE_DIR, 'arxiv_cache.json')
 HTML_FILE = os.path.join(BASE_DIR, 'arxiv_homepage.html')
 
 DEFAULT_KEYWORDS = [
-    "dark matter", 
-    "black hole", 
-    "simulation", 
-    "machine learning",
-    "milky way"
+    "obscured",
+    "active galactic nuclei", 
+    "early universe", 
+    "early times", 
+    "kerr",
+    "black hole"
 ]
 
 def fetch_oai_pmh_papers(cutoff_date):
