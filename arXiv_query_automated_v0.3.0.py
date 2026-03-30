@@ -8,6 +8,40 @@ import re
 import time
 from datetime import datetime, timedelta
 import argparse
+import sys
+import stat
+
+def create_launcher_shortcut(base_dir):
+    """Automatically creates a .bat or .sh file to launch the script in the future."""
+    # Get the directory where this python script lives and its exact filename
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    script_name = os.path.basename(__file__)
+    
+    if os.name == 'nt':  # Windows
+        bat_path = os.path.join(script_dir, 'Run_arXiv_Query.bat')
+        if not os.path.exists(bat_path):
+            print(f"Creating Windows launcher at: {bat_path}")
+            with open(bat_path, 'w') as f:
+                f.write("@echo off\n")
+                f.write("echo Running arXiv Query Script...\n")
+                f.write('cd /d "%~dp0"\n')
+                # Use sys.executable to ensure it uses the exact same Python environment
+                f.write(f'"{sys.executable}" "{script_name}" --dir "{base_dir}"\n')
+                f.write("pause\n")
+                
+    else:  # macOS / Linux
+        sh_path = os.path.join(script_dir, 'run_arxiv_query.sh')
+        if not os.path.exists(sh_path):
+            print(f"Creating Mac/Linux launcher at: {sh_path}")
+            with open(sh_path, 'w') as f:
+                f.write("#!/bin/bash\n")
+                f.write('echo "Running arXiv Query Script..."\n')
+                f.write('cd "$(dirname "$0")"\n')
+                f.write(f'"{sys.executable}" "{script_name}" --dir "{base_dir}"\n')
+            
+            # Make the .sh file executable
+            st = os.stat(sh_path)
+            os.chmod(sh_path, st.st_mode | stat.S_IEXEC)
 
 # Set up argument parsing
 parser = argparse.ArgumentParser(description="Automated arXiv Query Script")
@@ -34,6 +68,9 @@ else:
     BASE_DIR = user_input if user_input else './arXiv_data'
 
 os.makedirs(BASE_DIR, exist_ok=True)
+
+# Generate the automated launcher shortcut based on the resolved directory
+create_launcher_shortcut(BASE_DIR)
 
 CACHE_FILE = os.path.join(BASE_DIR, 'arxiv_cache.json')
 HTML_FILE = os.path.join(BASE_DIR, 'arxiv_homepage.html')
