@@ -12,12 +12,12 @@ import sys
 import stat
 
 def create_launcher_shortcut(base_dir):
-    """Automatically creates a .bat or .sh file to launch the script in the future."""
-    # Get the directory where this python script lives and its exact filename
+    """Automatically creates a .bat, .command, or .sh file to launch the script in the future."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
     script_name = os.path.basename(__file__)
     
-    if os.name == 'nt':  # Windows
+    # 1. WINDOWS
+    if os.name == 'nt':  
         bat_path = os.path.join(script_dir, 'Run_arXiv_Query.bat')
         if not os.path.exists(bat_path):
             print(f"Creating Windows launcher at: {bat_path}")
@@ -25,18 +25,34 @@ def create_launcher_shortcut(base_dir):
                 f.write("@echo off\n")
                 f.write("echo Running arXiv Query Script...\n")
                 f.write('cd /d "%~dp0"\n')
-                # Use sys.executable to ensure it uses the exact same Python environment
                 f.write(f'"{sys.executable}" "{script_name}" --dir "{base_dir}"\n')
                 f.write("pause\n")
                 
-    else:  # macOS / Linux
+    # 2. macOS
+    elif sys.platform == 'darwin':  
+        mac_path = os.path.join(script_dir, 'Run_arXiv_Query.command')
+        if not os.path.exists(mac_path):
+            print(f"Creating macOS launcher at: {mac_path}")
+            with open(mac_path, 'w') as f:
+                f.write("#!/bin/bash\n")
+                f.write('echo "Running arXiv Query Script..."\n')
+                # Securely get directory whether run as a script or double-clicked
+                f.write('cd "$(dirname "${BASH_SOURCE[0]:-$0}")"\n')
+                f.write(f'"{sys.executable}" "{script_name}" --dir "{base_dir}"\n')
+            
+            # Make the .command file executable
+            st = os.stat(mac_path)
+            os.chmod(mac_path, st.st_mode | stat.S_IEXEC)
+            
+    # 3. LINUX
+    else:  
         sh_path = os.path.join(script_dir, 'run_arxiv_query.sh')
         if not os.path.exists(sh_path):
-            print(f"Creating Mac/Linux launcher at: {sh_path}")
+            print(f"Creating Linux launcher at: {sh_path}")
             with open(sh_path, 'w') as f:
                 f.write("#!/bin/bash\n")
                 f.write('echo "Running arXiv Query Script..."\n')
-                f.write('cd "$(dirname "$0")"\n')
+                f.write('cd "$(dirname "${BASH_SOURCE[0]:-$0}")"\n')
                 f.write(f'"{sys.executable}" "{script_name}" --dir "{base_dir}"\n')
             
             # Make the .sh file executable
@@ -48,24 +64,23 @@ parser = argparse.ArgumentParser(description="Automated arXiv Query Script")
 parser.add_argument(
     '--dir', 
     type=str, 
-    default=None,  # Default to None so we can check if it was used
+    default=None,  
     help='Base directory to save arXiv cache and HTML files.'
 )
 args = parser.parse_args()
 
 # Determine BASE_DIR based on the 3-tier fallback
 if args.dir:
-    # 1. Use command-line argument if provided
     BASE_DIR = args.dir
 elif os.getenv('ARXIV_BASE_DIR'):
-    # 2. Use environment variable if provided
     BASE_DIR = os.getenv('ARXIV_BASE_DIR')
 else:
-    # 3. Interactive prompt if nothing was provided
     print("No directory specified via command line or environment variable.")
     user_input = input("Enter the path to save arXiv data (or press Enter to use './arXiv_data'): ").strip()
-    # Use the user's input, or default to './arXiv_data' if they just pressed Enter
     BASE_DIR = user_input if user_input else './arXiv_data'
+
+# CRITICAL FIX: Expand '~' to the actual home directory path, then make it absolute
+BASE_DIR = os.path.abspath(os.path.expanduser(BASE_DIR))
 
 os.makedirs(BASE_DIR, exist_ok=True)
 
