@@ -16,9 +16,9 @@ so it can build your local cache and generate your shortcut files.
 For Windows (using PowerShell):
 1. Open PowerShell.
 2. Navigate to your script's folder:
-   cd "D:\User\부산대학교\Lab\arXiv"
+   cd "Drive:\Your\Path\to\.py\file"
 3. Run the script:
-   python arXiv_query_automated_v0.2.0.py
+   python arXiv_query_automated_v0.3.1.py
 
 During this first run, the script will ask where you want to save your arXiv 
 data (the JSON cache and HTML file). Press Enter to use the default folder, or 
