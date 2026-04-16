@@ -3,7 +3,7 @@ Astrophysics arXiv Daily Dashboard - User Guide & Documentation
 ================================================================================
 
 This document covers the initial setup, automation techniques, and usage guide 
-for the Automated arXiv Query Script (v0.2.0).
+for the Automated arXiv Query Script (v0.3.1).
 
 --------------------------------------------------------------------------------
 1. INSTALLATION & THE AUTO-GENERATED SHORTCUT (.bat / .sh)
