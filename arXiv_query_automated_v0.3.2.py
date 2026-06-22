@@ -105,7 +105,7 @@ def fetch_oai_pmh_papers(cutoff_date):
     Downloads the entire 'physics:astro-ph' set from the cutoff date, 
     then filters for GA (and excludes EP) client-side.
     """
-    base_url = "http://export.arxiv.org/oai2"
+    base_url = "https://export.arxiv.org/oai2"
     
     # Initial request parameters
     params = {
@@ -222,18 +222,28 @@ def fetch_and_cache_papers():
             cache = json.load(f)
     else:
         cache = []
-        
+
     # --- Erase papers older than 7 days from the cache ---
-    cutoff_date = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+    purge_cutoff = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
     original_count = len(cache)
-    cache = [paper for paper in cache if paper['published'] >= cutoff_date]
+    cache = [paper for paper in cache if paper['published'] >= purge_cutoff]
     if len(cache) < original_count:
         print(f"Purged {original_count - len(cache)} old papers from the local cache.")
 
     known_ids = {paper['id'] for paper in cache}
-    
-    print(f"Checking arXiv OAI-PMH for new astro-ph papers since {cutoff_date}...")
-    harvested_papers = fetch_oai_pmh_papers(cutoff_date)
+
+    # --- Determine the query cutoff date ---
+    # Use the most recent paper already in the cache so we only fetch genuinely
+    # new records, rather than re-harvesting the entire 7-day window every run.
+    # Fall back to the purge cutoff on the very first run (empty cache).
+    if cache:
+        query_cutoff = max(paper['published'] for paper in cache)
+        print(f"Checking arXiv OAI-PMH for new astro-ph papers since {query_cutoff} (last cached paper date)...")
+    else:
+        query_cutoff = purge_cutoff
+        print(f"Empty cache — doing full harvest since {query_cutoff}...")
+
+    harvested_papers = fetch_oai_pmh_papers(query_cutoff)
     
     # Filter against papers we already have in the cache
     new_papers = [p for p in harvested_papers if p['id'] not in known_ids]
@@ -513,18 +523,19 @@ def generate_single_html(cache):
                 }}
                 if (queryStr.startsWith('ANDNOT')) {{ queryStr = 'all:astro-ph ' + queryStr; }}
 
-                const arxivUrl = `http://export.arxiv.org/api/query?search_query=${{encodeURIComponent(queryStr)}}&start=0&max_results=500&sortBy=submittedDate&sortOrder=descending`;
-                const proxyUrl = `https://api.allorigins.win/raw?url=${{encodeURIComponent(arxivUrl)}}`;
-                
+                // Direct fetch to the arXiv Atom API over HTTPS — no third-party proxy needed.
+                // The arXiv API sets permissive CORS headers, so this works from any browser.
+                const arxivUrl = `https://export.arxiv.org/api/query?search_query=${{encodeURIComponent(queryStr)}}&start=0&max_results=500&sortBy=submittedDate&sortOrder=descending`;
+
                 let maxRetries = 3;
                 let attempt = 0;
                 let xmlStr = null;
                 
                 while (attempt < maxRetries) {{
                     try {{
-                        const response = await fetch(proxyUrl);
+                        const response = await fetch(arxivUrl);
                         
-                        // Handle HTTP-level rate limiting from the proxy/origin
+                        // Handle HTTP-level rate limiting
                         if (response.status === 429 || response.status === 503) {{
                             attempt++;
                             let waitTime = attempt * 10;
@@ -536,16 +547,16 @@ def generate_single_html(cache):
                         
                         xmlStr = await response.text();
                         
-                        // Handle cases where AllOrigins returns 200 OK, but the text is an arXiv HTML error page
-                        if (xmlStr.includes('Retry-After') || xmlStr.includes('Too Many Requests') || !xmlStr.trim().startsWith('<')) {{
+                        // Guard against an unexpected non-XML payload
+                        if (!xmlStr.trim().startsWith('<')) {{
                             attempt++;
                             let waitTime = attempt * 10;
-                            loadingInd.innerText = `ArXiv rate limit detected in payload. Retrying in ${{waitTime}}s...`;
+                            loadingInd.innerText = `Unexpected response from arXiv. Retrying in ${{waitTime}}s...`;
                             await new Promise(r => setTimeout(r, waitTime * 1000));
                             continue;
                         }}
                         
-                        break; // Success! Break out of the retry loop.
+                        break; // Success!
                         
                     }} catch(e) {{
                         attempt++;
