@@ -233,12 +233,16 @@ def fetch_and_cache_papers():
     known_ids = {paper['id'] for paper in cache}
 
     # --- Determine the query cutoff date ---
-    # Use the most recent paper already in the cache so we only fetch genuinely
-    # new records, rather than re-harvesting the entire 7-day window every run.
+    # Advance one day past the most recent cached paper's date so the OAI-PMH
+    # 'from=' parameter requests only records strictly newer than what we have.
+    # The 'from=' parameter is inclusive, so reusing the exact last date would
+    # just re-fetch the same batch every run and the known_ids filter would
+    # silently discard them all — making it look like no new papers exist.
     # Fall back to the purge cutoff on the very first run (empty cache).
     if cache:
-        query_cutoff = max(paper['published'] for paper in cache)
-        print(f"Checking arXiv OAI-PMH for new astro-ph papers since {query_cutoff} (last cached paper date)...")
+        last_date = max(paper['published'] for paper in cache)
+        query_cutoff = (datetime.strptime(last_date, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
+        print(f"Checking arXiv OAI-PMH for new astro-ph papers since {query_cutoff} (day after last cached paper)...")
     else:
         query_cutoff = purge_cutoff
         print(f"Empty cache — doing full harvest since {query_cutoff}...")
