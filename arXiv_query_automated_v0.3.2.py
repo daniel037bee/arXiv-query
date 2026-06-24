@@ -1,3 +1,4 @@
+from importlib.metadata import metadata
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -79,6 +80,12 @@ else:
     user_input = input("Enter the path to save arXiv data (or press Enter to use './arXiv_data'): ").strip()
     BASE_DIR = user_input if user_input else './arXiv_data'
 
+def _clean_text(raw: str) -> str:
+    """Strip leading/trailing whitespace and collapse all internal runs."""
+    if not raw:
+        return ""
+    return re.sub(r'\s+', ' ', raw).strip()
+
 # CRITICAL FIX: Expand '~' to the actual home directory path, then make it absolute
 BASE_DIR = os.path.abspath(os.path.expanduser(BASE_DIR))
 
@@ -130,7 +137,7 @@ def fetch_oai_pmh_papers(cutoff_date):
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) arXiv-Dashboard-Bot/1.0'})
         
         try:
-            response = urllib.request.urlopen(req)
+            response = urllib.request.urlopen(req, timeout=60)
             xml_data = response.read()
         except urllib.error.HTTPError as e:
             # OAI-PMH legally uses 503 with a Retry-After header for rate limiting
@@ -178,8 +185,8 @@ def fetch_oai_pmh_papers(cutoff_date):
             # --- CUSTOM LOGIC: Include GA, Exclude EP ---
             if 'astro-ph.GA' in categories and 'astro-ph.EP' not in categories:
                 paper_id = metadata.find('arxiv:id', ns).text
-                title = metadata.find('arxiv:title', ns).text.replace('\n', ' ').strip()
-                abstract = metadata.find('arxiv:abstract', ns).text.replace('\n', ' ').strip()
+                title    = _clean_text(metadata.find('arxiv:title',    ns).text)
+                abstract = _clean_text(metadata.find('arxiv:abstract', ns).text)
                 
                 # Parse authors (OAI-PMH structures forenames and keynames separately)
                 authors_list = []
@@ -241,7 +248,7 @@ def fetch_and_cache_papers():
     # Fall back to the purge cutoff on the very first run (empty cache).
     if cache:
         last_date = max(paper['published'] for paper in cache)
-        query_cutoff = (datetime.strptime(last_date, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
+        query_cutoff = (datetime.strptime(last_date, '%Y-%m-%d')).strftime('%Y-%m-%d')
         print(f"Checking arXiv OAI-PMH for new astro-ph papers since {query_cutoff} (day after last cached paper)...")
     else:
         query_cutoff = purge_cutoff
