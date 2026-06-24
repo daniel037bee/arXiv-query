@@ -3,7 +3,7 @@ Astrophysics arXiv Daily Dashboard - User Guide & Documentation
 ================================================================================
 
 This document covers the initial setup, automation techniques, and usage guide 
-for the Automated arXiv Query Script (v0.3.1).
+for the Automated arXiv Query Script.
 
 --------------------------------------------------------------------------------
 1. INSTALLATION & THE AUTO-GENERATED SHORTCUT (.bat / .sh)
@@ -18,7 +18,7 @@ For Windows (using PowerShell):
 2. Navigate to your script's folder:
    cd "Drive:\Your\Path\to\.py\file"
 3. Run the script:
-   python arXiv_query_automated_v0.3.1.py
+   python arXiv_query_automated_v(version).py
 
 During this first run, the script will ask where you want to save your arXiv 
 data (the JSON cache and HTML file). Press Enter to use the default folder, or 
