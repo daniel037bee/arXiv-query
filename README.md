@@ -73,12 +73,17 @@ file in any web browser (Chrome, Edge, Safari, Firefox). 
 
 1. Local Cache Viewer (The Default View)
    By default, the page displays astrophysics papers announced on arXiv over the 
-   last 7 days. These are loaded locally from your `arxiv_cache.json` file, 
+   last 14 days. Change "Cache window" to any whole number from 7 to 28 days.
+   The Python script retains 28 days in `arxiv_cache.json`, so expanding the
+   displayed window needs no new download. The first run after upgrading
+   backfills this larger window. Dates include today and use UTC boundaries.
+   Your chosen display window is remembered in the same browser.
+   These papers are embedded in the generated HTML file,
    making the webpage lightning-fast. MathJax is embedded, so all LaTeX math 
    formulas in titles and abstracts will render perfectly.
 
 2. Keyword Highlights & Dynamic Sorting
-   - Use the "Manage Highlights & Sorting" panel to add custom keywords.
+   - Use the "Keywords (primary ranking)" panel to add custom keywords.
    - When a keyword is added, the dashboard instantly scans all loaded abstracts.
    - Matches are highlighted in bright yellow/orange.
    - Crucially, the papers are instantly re-sorted: papers with the highest 
@@ -87,17 +92,20 @@ file in any web browser (Chrome, Edge, Safari, Firefox). 
      there the next time you open the HTML file.
 
 3. Live arXiv Query Builder (API Fetching)
-   If you want to search beyond your 7-day cache or look at different sub-fields:
+   If you want to search beyond your cache or look at different sub-fields:
    - Use the dropdown menus to Include, Exclude, or Ignore specific sub-categories 
      (e.g., Include Cosmology [CO], Exclude Earth/Planets [EP]).
    - Click "Go (Live Fetch)". 
    - The webpage will reach out to the arXiv API in real-time, bypassing your 
      local cache, and fetch up to 500 historical papers matching your rules. 
    - It respects rate-limits automatically to prevent arXiv from blocking you.
+   - "Show local cache" returns to your saved papers and selected date window.
+     The cache-window control does not restrict live query results.
 
 4. Download Custom Results
    If you use the Live Query to fetch a highly specific list of papers, you can 
-   click "Download Results" to save that exact view as a raw `.json` file for 
+   click "Download Results" to save the date/search-filtered results across all
+   pages, in displayed order, as a raw `.json` file for
    later data analysis or record-keeping.
 
 5. Real-Time Search & Pagination
@@ -105,6 +113,73 @@ file in any web browser (Chrome, Edge, Safari, Firefox). 
    authors, and abstracts simultaneously. Papers are cleanly paginated (50 per 
    page) to keep the browser running smoothly.
 
+6. Editable PI ORCID Tracking (Secondary Ranking)
+   - Expand "PI ORCID tracking (secondary)" to edit the list. This section is
+     folded by default. Add/remove PIs, edit their ORCID iDs or URLs, and choose
+     their priorities. Click "Save changes" to update the ranking and remember
+     your list in the same browser. Invalid and duplicate ORCIDs are rejected.
+   - Defaults come from `grad_outreach_tracker_v7.xlsx`, Outreach Tracker,
+     rows 4–140: 145 named researchers after splitting multi-PI rows.
+     There are 121 active PIs and 24 Skip entries. The workbook has no ORCID
+     column, so the bundled `tracked_pis.json` records separately verified IDs
+     and their sources. The original workbook is not modified or needed to run.
+   - Weights are Highest = 3, High = 2, Medium = 1, Skip (sim/theory) = 0.
+     PI score is the sum of the weights of unique matched PIs. Skip entries
+     receive no boost; they do not exclude otherwise relevant papers.
+   - Sorting is strictly: unique abstract keyword count descending, then PI
+     score descending, then original order. A PI-only match never outranks a
+     paper with a keyword hit. Several PIs can contribute to the secondary score.
+   - Matches use exact author ORCID metadata when available, or the paper's
+     exact arXiv ID / DOI in a tracked PI's public ORCID works. There is no
+     author-name fallback. arXiv versions are normalized and PIs count once even
+     when more than one identifier matches. Category selection is unchanged.
+   - Public ORCID works are cached for 24 hours. "Save changes" fetches works for
+     newly enabled/added IDs as needed; "Refresh ORCID works" forces an update.
+     API failure preserves previous evidence and shows a message. Empty or
+     private/incomplete ORCID work lists can miss papers; the editor reports
+     records with no public identifiers. During verification, 11 active PIs
+     had no usable public work identifiers despite having a valid ORCID.
+   - "Export watchlist" downloads your saved settings as JSON. Use that file
+     with `--pi-config` to apply browser edits to future Python runs. Browser
+     changes do not silently overwrite the workbook or files on disk.
+   - "Reset to tracker defaults" restores the list embedded by the Python run.
+     An already saved browser list takes precedence when regenerating HTML.
+     If browser storage is unavailable, changes work for the current session;
+     export the watchlist to preserve it.
+
+[ Command-line options ]
+Keep `arxiv_orcid.py` and `tracked_pis.json` alongside the main Python script.
+All runtime code uses the Python standard library; no Excel packages are needed.
+
+Normal run (14-day initial display; 28-day retention):
+  python arXiv_query_automated_v0.4.0.py --dir "./arXiv_data"
+
+Choose a different initial display window (a saved browser choice takes precedence):
+  python arXiv_query_automated_v0.4.0.py --dir "./arXiv_data" --cache-days 21
+
+Use a watchlist exported from the page:
+  python arXiv_query_automated_v0.4.0.py --dir "./arXiv_data" --pi-config "path/to/tracked_pis.json"
+
+Import names/priorities from an updated tracker (existing verified names retain IDs):
+  python arXiv_query_automated_v0.4.0.py --dir "./arXiv_data" --pi-tracker "path/to/tracker.xlsx"
+The tracker must contain `PI (contact)` and `Priority` headers. An optional ORCID
+column is accepted, with one PI per row when an explicit ORCID is supplied.
+New names without IDs remain unresolved until an ID is provided. Imported/custom
+settings are saved as `pi_settings.json` in the data folder for later shortcut runs.
+After an import, use the page's reset button to replace an older browser watchlist.
+
+Force an ORCID refresh, or rebuild from existing caches without network access:
+  python arXiv_query_automated_v0.4.0.py --dir "./arXiv_data" --refresh-orcid
+  python arXiv_query_automated_v0.4.0.py --dir "./arXiv_data" --offline
+
+If ORCID requires authentication, the Python fetcher accepts an optional
+`ORCID_ACCESS_TOKEN` environment variable. It is never embedded in the HTML.
+ORCID API reference: https://info.orcid.org/documentation/api-tutorials/api-tutorial-read-data-on-a-record/
+
+[ Tests ]
+  python -m unittest discover -s tests -v
+Node.js is used, when available, to test the JavaScript embedded in generated HTML.
+Set `ARXIV_TEST_NODE` to its executable path if it is not on PATH.
 
 Please report me about any issues or ideas for this script at:
 daniel037bee@pusan.ac.kr
