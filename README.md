@@ -124,15 +124,34 @@ file in any web browser (Chrome, Edge, Safari, Firefox). 
      column, so the bundled `tracked_pis.json` records separately verified IDs
      and their sources. The original workbook is not modified or needed to run.
    - Weights are Highest = 3, High = 2, Medium = 1, Skip (sim/theory) = 0.
-     PI score is the sum of the weights of unique matched PIs. Skip entries
-     receive no boost; they do not exclude otherwise relevant papers.
+     PI score is the sum of the weights of the unique matched PIs that the paper
+     promotes. Skip entries receive no boost; they do not exclude otherwise
+     relevant papers.
+   - A tracked PI promotes a paper only when they are its first, second or
+     corresponding author. arXiv publishes no corresponding-author field, so
+     "corresponding" means the arXivRaw submitter or a contact address printed
+     in the record's comments or abstract. Any other position, last author
+     included, is still listed under the paper but marked "no boost" and adds
+     nothing to the PI score. Edit PROMOTED_ROLES in `arxiv_orcid.py` to change
+     the rule; adding "last" also promotes senior authors.
+   - Submitters are looked up one paper at a time through the OAI `arXivRaw`
+     format, only for papers whose tracked PI is otherwise unpromoted, and at
+     most 40 per run (`SUBMITTER_LOOKUP_LIMIT`). The rest resolve on later runs,
+     each result is cached with the paper, and `--offline` skips the lookups.
+     Live browser queries use the Atom API, which carries no submitter, so there
+     corresponding authorship rests on printed addresses alone.
    - Sorting is strictly: unique abstract keyword count descending, then PI
      score descending, then original order. A PI-only match never outranks a
      paper with a keyword hit. Several PIs can contribute to the secondary score.
    - Matches use exact author ORCID metadata when available, or the paper's
      exact arXiv ID / DOI in a tracked PI's public ORCID works. There is no
-     author-name fallback. arXiv versions are normalized and PIs count once even
-     when more than one identifier matches. Category selection is unchanged.
+     author-name fallback for identifying a PI. Names are used only to place a
+     PI who is already identified by ORCID (surname plus first initial) when
+     arXiv received no author ORCIDs for that paper, and to compare a PI against
+     the submitter. arXiv versions are normalized and PIs count once even when
+     more than one identifier matches. Category selection is unchanged.
+   - Author positions are stored per paper, so an existing `arxiv_cache.json`
+     from an earlier version is re-harvested once over the full 28-day window.
    - Public ORCID works are cached for 24 hours. "Save changes" fetches works for
      newly enabled/added IDs as needed; "Refresh ORCID works" forces an update.
      API failure preserves previous evidence and shows a message. Empty or
@@ -152,25 +171,27 @@ Keep `arxiv_orcid.py` and `tracked_pis.json` alongside the main Python script.
 All runtime code uses the Python standard library; no Excel packages are needed.
 
 Normal run (14-day initial display; 28-day retention):
-  python arXiv_query_automated_v0.4.0.py --dir "./arXiv_data"
+  python arXiv_query_automated_v0.4.1.py --dir "./arXiv_data"
 
 Choose a different initial display window (a saved browser choice takes precedence):
-  python arXiv_query_automated_v0.4.0.py --dir "./arXiv_data" --cache-days 21
+  python arXiv_query_automated_v0.4.1.py --dir "./arXiv_data" --cache-days 21
 
 Use a watchlist exported from the page:
-  python arXiv_query_automated_v0.4.0.py --dir "./arXiv_data" --pi-config "path/to/tracked_pis.json"
+  python arXiv_query_automated_v0.4.1.py --dir "./arXiv_data" --pi-config "path/to/tracked_pis.json"
 
 Import names/priorities from an updated tracker (existing verified names retain IDs):
-  python arXiv_query_automated_v0.4.0.py --dir "./arXiv_data" --pi-tracker "path/to/tracker.xlsx"
-The tracker must contain `PI (contact)` and `Priority` headers. An optional ORCID
-column is accepted, with one PI per row when an explicit ORCID is supplied.
+  python arXiv_query_automated_v0.4.1.py --dir "./arXiv_data" --pi-tracker "path/to/tracker.xlsx"
+The tracker must contain `PI (contact)` and `Priority` headers. Optional ORCID and
+Email columns are accepted, with one PI per row when either is supplied. An email
+is never used to identify a PI, only to confirm a corresponding author already
+matched by ORCID.
 New names without IDs remain unresolved until an ID is provided. Imported/custom
 settings are saved as `pi_settings.json` in the data folder for later shortcut runs.
 After an import, use the page's reset button to replace an older browser watchlist.
 
 Force an ORCID refresh, or rebuild from existing caches without network access:
-  python arXiv_query_automated_v0.4.0.py --dir "./arXiv_data" --refresh-orcid
-  python arXiv_query_automated_v0.4.0.py --dir "./arXiv_data" --offline
+  python arXiv_query_automated_v0.4.1.py --dir "./arXiv_data" --refresh-orcid
+  python arXiv_query_automated_v0.4.1.py --dir "./arXiv_data" --offline
 
 If ORCID requires authentication, the Python fetcher accepts an optional
 `ORCID_ACCESS_TOKEN` environment variable. It is never embedded in the HTML.

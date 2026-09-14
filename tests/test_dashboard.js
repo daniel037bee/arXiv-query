@@ -30,6 +30,8 @@ vm.runInContext(`
 `, context);
 assert.deepEqual(Array.from(context.elements, e => Number(e.dataset.originalIndex)), [1, 3, 4, 2, 5, 0]);
 assert.deepEqual(Array.from(context.testMatches, p => p.weight), [3, 2]);
+// Identified by ORCID but not placed on the paper: listed, never promoted.
+assert.deepEqual(Array.from(context.testMatches, p => p.role + ':' + p.promoted), ['unknown:false', 'unknown:false']);
 assert.equal(context.nameOnlyMatches.length, 0);
 assert.equal(context.normalizedOldId, 'astro-ph/0601001');
 assert.equal(context.invalidOrcid, '');
@@ -39,13 +41,53 @@ assert.equal(context.cutoff28, '2026-08-18');
 assert.throws(() => vm.runInContext(`validatePIs([{name:'PI',orcid:'0000-0003-2895-6219',priority:'High'}])`,context), /Invalid ORCID/);
 assert.throws(() => vm.runInContext(`validatePIs([{name:'A',orcid:'0000-0003-2895-6218',priority:'High'},{name:'B',orcid:'0000-0003-2895-6218',priority:'Medium'}])`,context), /more than once/);
 
+// Author position decides promotion: first, second or corresponding only.
+vm.runInContext(`
+    const A = '0000-0003-2895-6218', B = '0000-0002-5612-3427', C = '0000-0001-9879-7780';
+    const base = {id: 'https://arxiv.org/abs/2401.54321', doi: '10.1234/other', abstract: 'An abstract.', comments: '10 pages'};
+    const middle = {...base, authors: 'R Roe, M Moe, Jenny Greene, A Ang', author_count: 4, orcid_positions: {[B]: [2]}};
+    const listed = paper => getPIMatches(paper).map(pi => pi.role + ':' + (pi.promoted ? '+' + pi.weight : 'no'));
+    globalThis.roleCases = {
+        first: listed({...base, authors: 'Anna-Christina Eilers, R Roe', author_count: 2, orcid_positions: {[A]: [0]}}),
+        second: listed({...base, authors: 'R Roe, Jenny Greene', author_count: 2, orcid_positions: {[B]: [1]}}),
+        buried: listed(middle),
+        last: listed({...base, authors: 'R Roe, M Moe, A Ang, Jenny Greene', author_count: 4, orcid_positions: {[B]: [3]}}),
+        submitter: listed({...middle, submitter: 'Jennifer E. Greene'}),
+        emailed: listed({...middle, comments: 'Contact: jgreene@princeton.edu'}),
+        otherEmail: listed({...middle, comments: 'Contact: rroe@example.edu'}),
+        placedByName: listed({...base, id: 'https://arxiv.org/abs/2401.12345',
+            authors: 'A. Eilers, Jenny Greene', author_count: 2}),
+        unplaceable: listed({...base, id: 'https://arxiv.org/abs/2401.12345', authors: 'R Roe, M Moe', author_count: 2}),
+        skipWeight: listed({...base, authors: 'Fabio Pacucci, R Roe', author_count: 2, orcid_positions: {[C]: [0]}}),
+        promotedFirst: listed({...base, authors: 'Jenny Greene, R Roe, Anna-Christina Eilers, A Ang',
+            author_count: 4, orcid_positions: {[B]: [0], [A]: [2]}})
+    };
+    globalThis.keptEmail = validatePIs([{name: 'PI', orcid: A, priority: 'High', email: 'pi@example.edu'}])[0].email;
+`, context);
+assert.deepEqual(JSON.parse(JSON.stringify(context.roleCases)), {
+    first: ['first:+3'],
+    second: ['second:+2'],
+    buried: ['co-author:no'],
+    last: ['last:no'],
+    submitter: ['corresponding:+2'],
+    emailed: ['corresponding:+2'],
+    otherEmail: ['co-author:no'],
+    placedByName: ['first:+3', 'second:+2'],
+    unplaceable: ['unknown:no', 'unknown:no'],
+    skipWeight: [],
+    promotedFirst: ['first:+2', 'co-author:no']
+});
+assert.equal(context.keptEmail, 'pi@example.edu');
+
 // Exercise the actual rendering pipeline with paper elements and inspect its scores/highlights.
 vm.runInContext(`
+    const A = '0000-0003-2895-6218', B = '0000-0002-5612-3427';
     const records = [
-        {id: 'https://arxiv.org/abs/2401.00001', title: 'Keyword first', abstract: 'black hole and obscured', authors: 'Someone', published: '2026-09-14'},
-        {id: 'https://arxiv.org/abs/2401.00002', title: 'PI only', abstract: 'No target terms', authors: 'PI', published: '2026-09-14', author_orcids: ['0000-0003-2895-6218']},
-        {id: 'https://arxiv.org/abs/2401.00003', title: 'High PI', abstract: 'black hole black hole', authors: 'PI', published: '2026-09-14', author_orcids: ['0000-0002-5612-3427']},
-        {id: 'https://arxiv.org/abs/2401.00004', title: 'Highest PI', abstract: 'black hole <script>bad()</script>', authors: 'PI', published: '2026-09-14', author_orcids: ['0000-0003-2895-6218']}
+        {id: 'https://arxiv.org/abs/2401.00001', title: 'Keyword first', abstract: 'black hole and obscured', authors: 'Someone', author_count: 1, published: '2026-09-14'},
+        {id: 'https://arxiv.org/abs/2401.00002', title: 'PI only', abstract: 'No target terms', authors: 'Anna-Christina Eilers', author_count: 1, orcid_positions: {[A]: [0]}, published: '2026-09-14'},
+        {id: 'https://arxiv.org/abs/2401.00003', title: 'High PI', abstract: 'black hole black hole', authors: 'Jenny Greene, R Roe', author_count: 2, orcid_positions: {[B]: [0]}, published: '2026-09-14'},
+        {id: 'https://arxiv.org/abs/2401.00004', title: 'Highest PI', abstract: 'black hole <script>bad()</script>', authors: 'Anna-Christina Eilers, R Roe', author_count: 2, orcid_positions: {[A]: [0]}, published: '2026-09-14'},
+        {id: 'https://arxiv.org/abs/2401.00005', title: 'Buried PI', abstract: 'black hole', authors: 'R Roe, M Moe, Jenny Greene, A Ang', author_count: 4, orcid_positions: {[B]: [2]}, published: '2026-09-14'}
     ];
     currentDataset = records;
     activeKeywords = ['black hole', 'obscured'];
@@ -62,16 +104,21 @@ vm.runInContext(`
     filterPapers = () => {};
     applyHighlightsAndRender();
     globalThis.ranked = allPapers.map(p => Number(p.dataset.originalIndex));
-    globalThis.escapedAbstract = allPapers.find(p => p.dataset.originalIndex === '3').nodes['.abstract-text'].innerHTML;
+    const byIndex = index => allPapers.find(p => p.dataset.originalIndex === index).nodes;
+    globalThis.escapedAbstract = byIndex('3')['.abstract-text'].innerHTML;
+    globalThis.promotedHTML = byIndex('3')['.orcid-matches'].innerHTML;
+    globalThis.mutedHTML = byIndex('4')['.orcid-matches'].innerHTML;
     globalThis.scores = currentDataset.map(p => [p.keyword_score, p.pi_score]);
     enabled.checked = false;
     applyHighlightsAndRender();
     globalThis.unweighted = allPapers.map(p => Number(p.dataset.originalIndex));
 `, context);
-assert.deepEqual(Array.from(context.ranked), [0, 3, 2, 1]);
-assert.deepEqual(JSON.parse(JSON.stringify(context.scores)), [[2, 0], [0, 3], [1, 2], [1, 3]]);
+assert.deepEqual(Array.from(context.ranked), [0, 3, 2, 4, 1]);
+assert.deepEqual(JSON.parse(JSON.stringify(context.scores)), [[2, 0], [0, 3], [1, 2], [1, 3], [1, 0]]);
 assert.ok(context.escapedAbstract.includes('&lt;script&gt;bad()&lt;/script&gt;'));
-assert.deepEqual(Array.from(context.unweighted), [0, 2, 3, 1]);
+assert.match(context.promotedHTML, /PI score 3: .*class="pi-promoted".*first author, \+3/);
+assert.match(context.mutedHTML, /PI score 0: .*class="pi-muted".*co-author, no boost/);
+assert.deepEqual(Array.from(context.unweighted), [0, 2, 3, 4, 1]);
 
 vm.runInContext(`
     currentDataset = [0, 6, 7, 13, 14, 27, 28].map(daysAgo => {
@@ -106,4 +153,4 @@ vm.runInContext(`
     downloadResults();
 `, context);
 assert.equal(JSON.parse(context.downloadedJSON).length, 2);
-console.log('Dashboard JavaScript: ranking, editor validation, cache windows, matching, toggle, exports, and safe highlights passed.');
+console.log('Dashboard JavaScript: promotion roles, ranking, editor validation, cache windows, matching, toggle, exports, and safe highlights passed.');

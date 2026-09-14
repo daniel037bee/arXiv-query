@@ -6,6 +6,7 @@ from pathlib import Path
 import posixpath
 import re
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -15,6 +16,15 @@ import zipfile
 
 PRIORITY_WEIGHTS = {"Highest": 3, "High": 2, "Medium": 1, "Skip (sim/theory)": 0}
 DEFAULT_CONFIG = Path(__file__).with_name("tracked_pis.json")
+
+# Only a leading or corresponding author promotes a paper; a tracked PI buried in a
+# long collaboration list does not. arXiv publishes no corresponding-author field, so
+# "corresponding" means the arXivRaw submitter or a contact address printed in the
+# record. Add "last" here to also promote senior (final) authors.
+PROMOTED_ROLES = ("first", "second", "corresponding")
+ROLE_ORDER = {"first": 0, "second": 1, "corresponding": 2, "last": 3, "co-author": 4, "unknown": 5}
+NAME_SUFFIXES = {"jr", "sr", "ii", "iii", "iv"}
+EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
 
 def normalize_orcid(value):
@@ -42,6 +52,81 @@ def normalize_doi(value):
     value = urllib.parse.unquote(str(value or "").strip()).lower()
     value = re.sub(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", "", value)
     return value if re.fullmatch(r"10\.\d{4,9}/\S+", value) else ""
+
+
+def _fold(value):
+    """Accent-free lowercase text, so diacritics cannot break a name or email comparison."""
+    text = unicodedata.normalize("NFKD", str(value or ""))
+    return "".join(c for c in text if not unicodedata.combining(c)).casefold()
+
+
+def _name_parts(value):
+    tokens = [token for token in re.split(r"[^a-z]+", _fold(value)) if token]
+    while len(tokens) > 1 and tokens[-1] in NAME_SUFFIXES:
+        tokens.pop()
+    # A lone surname constrains nothing further: do not read it as a first initial.
+    return (tokens[-1], tokens[0][:1] if len(tokens) > 1 else "") if tokens else ("", "")
+
+
+def names_match(person_name, author_name):
+    """Surname plus first initial. Only ever used to place a PI already identified by ORCID."""
+    surname, initial = _name_parts(person_name)
+    other_surname, other_initial = _name_parts(author_name)
+    if not surname or surname != other_surname:
+        return False
+    return not initial or not other_initial or initial == other_initial
+
+
+def author_names(paper):
+    """Ordered author names, or [] when the stored string cannot be split back reliably."""
+    names = [name.strip() for name in str(paper.get("authors") or "").split(",") if name.strip()]
+    count = paper.get("author_count")
+    return names if not count or len(names) == count else []
+
+
+def contact_emails(paper):
+    """Addresses arXiv actually carries: the submitter line, the comments field, the abstract."""
+    text = " ".join(str(paper.get(field) or "") for field in ("submitter", "comments", "abstract"))
+    return {match.group(0).casefold() for match in EMAIL_PATTERN.finditer(text)}
+
+
+def _email_matches(person, emails):
+    known = _fold(person.get("email")).strip()
+    surname = _name_parts(person.get("name"))[0]
+    for email in emails:
+        if known and email == known:
+            return True
+        local = re.sub(r"[^a-z]", "", _fold(email.split("@", 1)[0]))
+        if len(surname) >= 3 and surname in local:
+            return True
+    return False
+
+
+def is_corresponding(paper, person):
+    """arXiv exposes no corresponding author, so accept the submitter or a printed contact address."""
+    submitter = paper.get("submitter")
+    if submitter and names_match(person.get("name"), re.sub(r"<[^>]*>", " ", str(submitter))):
+        return True
+    return _email_matches(person, contact_emails(paper))
+
+
+def author_role(paper, person, positions=None):
+    """Place a matched PI: first, second, corresponding, last, co-author, or unknown."""
+    position = min(positions) if positions else None
+    if position is None:
+        # ORCID public works can link a PI to a paper whose author ORCIDs arXiv never received.
+        position = next((i for i, name in enumerate(author_names(paper))
+                         if names_match(person.get("name"), name)), None)
+    if position == 0:
+        return "first", position
+    if position == 1:
+        return "second", position
+    if is_corresponding(paper, person):
+        return "corresponding", position
+    count = paper.get("author_count") or len(author_names(paper))
+    if position is not None and count and position == count - 1:
+        return "last", position
+    return ("co-author" if position is not None else "unknown"), position
 
 
 def _xlsx_rows(path):
@@ -100,6 +185,7 @@ def load_watchlist(config_path=None, tracker_path=None):
                 raw = re.sub(r"\s*\(CITA\)\s*\+ dept faculty", "", raw)
                 names = raw.split(" / ")
                 orcid_col = next((col for label, col in headers.items() if label.casefold() in ("orcid", "orcid id", "orcid iD".casefold())), None)
+                email_col = next((col for label, col in headers.items() if label.casefold() in ("email", "e-mail", "contact email")), None)
                 for name in names:
                     person = dict(known.get(name.strip().casefold(), {}))
                     person.update(name=name.strip(), institution=values.get(headers.get("Institution"), ""),
@@ -108,6 +194,8 @@ def load_watchlist(config_path=None, tracker_path=None):
                         if len(names) != 1:
                             raise ValueError(f"Row {row_number}: put each PI and ORCID on a separate row.")
                         person["orcid"] = values[orcid_col]
+                    if email_col and values.get(email_col) and len(names) == 1:
+                        person["email"] = values[email_col]
                     people.append(person)
         if not people:
             raise ValueError("No PI (contact) and Priority columns found in the tracker.")
@@ -122,6 +210,12 @@ def load_watchlist(config_path=None, tracker_path=None):
         if raw_orcid and not orcid:
             raise ValueError(f"Invalid ORCID for {person['name']}: {raw_orcid}")
         person.update(orcid=orcid or None, weight=PRIORITY_WEIGHTS[priority])
+        # An email is optional evidence for corresponding authorship; drop anything unusable.
+        email = _fold(person.get("email")).strip()
+        if EMAIL_PATTERN.fullmatch(email):
+            person["email"] = email
+        else:
+            person.pop("email", None)
         key = orcid or person["name"].casefold()
         if key not in unique or person["weight"] > unique[key]["weight"]:
             unique[key] = person
@@ -210,15 +304,38 @@ def build_orcid_index(people, cache_path, refresh=False, offline=False):
     return index, statuses
 
 
-def match_paper(paper, people, index):
-    ids = {normalize_orcid(value) for value in paper.get("author_orcids", [])}
+def match_paper(paper, people, index, promoted_roles=PROMOTED_ROLES):
+    """Link tracked PIs to a paper, then mark which of them their author position promotes."""
+    positions = {}
+    for orcid, places in (paper.get("orcid_positions") or {}).items():
+        normalized = normalize_orcid(orcid)
+        if normalized:
+            positions[normalized] = sorted(int(place) for place in places)
+    ids = set(positions)
+    ids.update(filter(None, (normalize_orcid(value) for value in paper.get("author_orcids", []))))
     arxiv = normalize_arxiv_id(paper.get("id"))
     if arxiv:
         ids.update(index.get("arxiv:" + arxiv, []))
     doi = normalize_doi(paper.get("doi"))
     if doi:
         ids.update(index.get("doi:" + doi, []))
-    matches = [{"name": p["name"], "orcid": p["orcid"], "priority": p["priority"], "weight": p["weight"]}
-               for p in people if p["weight"] and p.get("orcid") in ids]
-    matches.sort(key=lambda p: (-p["weight"], p["name"]))
+    matches = []
+    for person in people:
+        if not person["weight"] or not person.get("orcid") or person["orcid"] not in ids:
+            continue
+        role, position = author_role(paper, person, positions.get(person["orcid"]))
+        matches.append({"name": person["name"], "orcid": person["orcid"], "priority": person["priority"],
+                        "weight": person["weight"], "role": role, "position": position,
+                        "promoted": role in promoted_roles})
+    matches.sort(key=lambda p: (not p["promoted"], -p["weight"], ROLE_ORDER.get(p["role"], 9), p["name"]))
     return matches
+
+
+def pi_score(matches):
+    """Only promoted matches move a paper up the ranking."""
+    return sum(match["weight"] for match in matches if match["promoted"])
+
+
+def needs_submitter(paper):
+    """A submitter lookup can only change the ranking while some match is still unpromoted."""
+    return "submitter" not in paper and any(not match["promoted"] for match in paper.get("orcid_matches", []))

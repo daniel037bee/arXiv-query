@@ -12,8 +12,8 @@ import argparse
 import sys
 import stat
 from arxiv_orcid import (
-    PRIORITY_WEIGHTS, load_watchlist, build_orcid_index, match_paper,
-    normalize_orcid,
+    PRIORITY_WEIGHTS, PROMOTED_ROLES, ROLE_ORDER, load_watchlist, build_orcid_index, match_paper,
+    needs_submitter, normalize_arxiv_id, normalize_orcid, pi_score,
 )
 
 def create_launcher_shortcut(base_dir):
@@ -173,15 +173,24 @@ def fetch_oai_pmh_papers(cutoff_date, with_status=False):
                 title    = _clean_text(metadata.find('arxiv:title',    ns).text)
                 abstract = _clean_text(metadata.find('arxiv:abstract', ns).text)
                 
-                # Parse authors (OAI-PMH structures forenames and keynames separately)
+                # Parse authors (OAI-PMH structures forenames and keynames separately).
+                # Author order is the ranking signal now, so record where each ORCID sits.
                 authors_list = []
+                orcid_positions = {}
                 for author in metadata.findall('arxiv:authors/arxiv:author', ns):
                     keyname = author.find('arxiv:keyname', ns)
                     forenames = author.find('arxiv:forenames', ns)
                     name = ""
                     if forenames is not None and forenames.text: name += forenames.text + " "
                     if keyname is not None and keyname.text: name += keyname.text
-                    if name: authors_list.append(name.strip())
+                    if not name: continue
+                    position = len(authors_list)
+                    authors_list.append(name.strip())
+                    for element in author.iter():
+                        if element.tag.rsplit('}', 1)[-1].lower() == 'orcid':
+                            orcid = normalize_orcid(element.text)
+                            if orcid and position not in orcid_positions.setdefault(orcid, []):
+                                orcid_positions[orcid].append(position)
                     
                 # Use the OAI datestamp (announcement date), NOT the original submission date
                 header = record.find('oai:header', ns)
@@ -193,15 +202,13 @@ def fetch_oai_pmh_papers(cutoff_date, with_status=False):
                     'title': title,
                     'abstract': abstract,
                     'authors': ', '.join(authors_list),
+                    'author_count': len(authors_list),
                     'published': published,
                     'doi': _clean_text(metadata.findtext('arxiv:doi', '', ns)),
-                    'author_orcids': sorted({
-                        normalize_orcid(element.text)
-                        for author in metadata.findall('arxiv:authors/arxiv:author', ns)
-                        for element in author.iter()
-                        if element.tag.rsplit('}', 1)[-1].lower() == 'orcid'
-                        and normalize_orcid(element.text)
-                    }),
+                    # Comments often carry the only contact address arXiv publishes.
+                    'comments': _clean_text(metadata.findtext('arxiv:comments', '', ns)),
+                    'author_orcids': sorted(orcid_positions),
+                    'orcid_positions': orcid_positions,
                 })
 
         # Check for pagination (resumptionToken)
@@ -216,6 +223,67 @@ def fetch_oai_pmh_papers(cutoff_date, with_status=False):
             break  # No more pages
 
     return (new_papers, complete) if with_status else new_papers
+
+SUBMITTER_LOOKUP_LIMIT = 40
+
+
+def fetch_submitters(papers, limit=SUBMITTER_LOOKUP_LIMIT):
+    """Resolve the arXivRaw submitter: arXiv's only published corresponding-author signal.
+
+    Called just for papers whose tracked PI is not already a promoted author, so the
+    extra OAI traffic stays proportional to the watchlist, not to the whole harvest.
+    """
+    ns = {'oai': 'http://www.openarchives.org/OAI/2.0/', 'raw': 'http://arxiv.org/OAI/arXivRaw/'}
+    resolved = 0
+    for paper in papers:
+        if resolved >= limit:
+            print(f"Submitter lookups capped at {limit} this run; the rest resolve on the next run.")
+            break
+        arxiv_id = normalize_arxiv_id(paper['id'])
+        if not arxiv_id:
+            paper['submitter'] = ''
+            continue
+        params = {'verb': 'GetRecord', 'identifier': f'oai:arXiv.org:{arxiv_id}', 'metadataPrefix': 'arXivRaw'}
+        url = f"https://export.arxiv.org/oai2?{urllib.parse.urlencode(params)}"
+        req = urllib.request.Request(url, headers={'User-Agent': 'arXiv-Dashboard-Bot/1.0 (submitter lookup)'})
+        offline = False
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(req, timeout=30) as response:
+                    root = ET.fromstring(response.read())
+            except urllib.error.HTTPError as error:
+                if error.code in (429, 503):
+                    if attempt < 2:
+                        wait = int(error.headers.get('Retry-After', 10))
+                        print(f"HTTP {error.code}: waiting {wait}s before retrying the submitter lookup...")
+                        time.sleep(wait)
+                        continue
+                    # Rate limiting says nothing about this paper, so leave it for a later run.
+                    print(f"HTTP {error.code}: stopping submitter lookups for this run.")
+                    offline = True
+                else:
+                    print(f"Submitter unavailable for {arxiv_id}: HTTP {error.code} {error.reason}")
+                    paper['submitter'] = ''
+            except (urllib.error.URLError, TimeoutError, OSError, ET.ParseError) as error:
+                # Leave the remaining papers unmarked so a later run retries them.
+                print(f"Submitter lookups unavailable ({error}); keeping the current rankings.")
+                offline = True
+            else:
+                paper['submitter'] = _clean_text(root.findtext('.//raw:submitter', '', ns))
+                resolved += 1
+            break
+        if offline:
+            break
+        time.sleep(3)  # arXiv OAI courtesy delay
+    return resolved
+
+
+def save_cache(cache):
+    """Persist harvested metadata only; rankings are recomputed from the watchlist each run."""
+    with open(CACHE_FILE, 'w', encoding='utf-8') as f:
+        json.dump([{k: v for k, v in paper.items() if k not in ('orcid_matches', 'pi_score')}
+                   for paper in cache], f, indent=4)
+
 
 def fetch_and_cache_papers():
     if os.path.exists(CACHE_FILE):
@@ -242,8 +310,8 @@ def fetch_and_cache_papers():
             pass
 
     # Revisit the last inclusive date to catch updates. Backfill the full window
-    # once when migrating caches that predate DOI/ORCID metadata support.
-    if (cache and all('doi' in p and 'author_orcids' in p for p in cache)
+    # once when migrating caches that predate DOI/ORCID or author-position metadata.
+    if (cache and all('doi' in p and 'orcid_positions' in p for p in cache)
             and coverage.get('coverage_from', '9999-12-31') <= purge_cutoff):
         last_date = max(paper['published'] for paper in cache)
         query_cutoff = (datetime.strptime(last_date, '%Y-%m-%d')).strftime('%Y-%m-%d')
@@ -258,7 +326,11 @@ def fetch_and_cache_papers():
     
     # Refresh existing records too, so older caches gain DOI/ORCID fields.
     updated_by_id = {p['id']: p for p in cache}
-    updated_by_id.update({p['id']: p for p in harvested_papers})
+    for paper in harvested_papers:
+        previous = updated_by_id.get(paper['id'])
+        if previous and 'submitter' in previous:
+            paper['submitter'] = previous['submitter']  # a re-harvest must not cost a lookup
+        updated_by_id[paper['id']] = paper
     new_papers = [p for p in harvested_papers if p['id'] not in known_ids]
     
     if new_papers:
@@ -267,8 +339,7 @@ def fetch_and_cache_papers():
         
     # Sort and save
     cache.sort(key=lambda x: x['published'], reverse=True)
-    with open(CACHE_FILE, 'w', encoding='utf-8') as f:
-        json.dump(cache, f, indent=4)
+    save_cache(cache)
     if complete:
         coverage = {'coverage_from': min(coverage.get('coverage_from', query_cutoff), query_cutoff)}
     else:
@@ -353,6 +424,7 @@ def generate_single_html(cache, tracked_pis=None, orcid_index=None, orcid_status
             .highlight {{ background-color: #ffeaa7; font-weight: bold; color: #d35400; padding: 0 3px; border-radius: 3px; }}
             .orcid-box {{ border-left: 4px solid #638b21; margin-bottom: 20px; }}
             .orcid-matches {{ color: #45651b; font-size: 0.9em; margin-bottom: 10px; }}
+            .orcid-matches .pi-muted {{ color: #7a7a7a; }}
             .orcid-matches a {{ text-decoration: underline; }}
             .pi-table-wrap {{ max-height: 300px; overflow: auto; margin-top: 10px; }}
             .pi-table {{ width: 100%; border-collapse: collapse; font-size: 0.85em; }}
@@ -455,6 +527,9 @@ def generate_single_html(cache, tracked_pis=None, orcid_index=None, orcid_status
         <div class="panel-box orcid-box">
             <details id="piEditor"><summary>PI ORCID tracking (secondary) — edit watchlist and priorities</summary>
                 <p class="ranking-note">Keywords rank first. PI score breaks ties: Highest = 3, High = 2, Medium = 1, Skip = 0.
+                    Only a first, second or corresponding author is promoted: a tracked PI listed anywhere else is still
+                    shown under the paper, marked "no boost", and adds nothing to the score. arXiv publishes no
+                    corresponding-author field, so that means the submitter or a contact address printed in the record.
                     Each matched PI counts once. Edit the list and save to apply changes in this browser.</p>
                 <label><input type="checkbox" id="orcidEnabled" checked onchange="togglePIRanking()"> Use PI priority to break keyword-score ties</label>
                 <p id="orcidStatus"></p>
@@ -526,6 +601,9 @@ def generate_single_html(cache, tracked_pis=None, orcid_index=None, orcid_status
             const priorityWeights = {_script_json(PRIORITY_WEIGHTS)};
             let trackedPIs = defaultPIs.map(pi => ({{...pi}}));
             const orcidIndex = {_script_json(orcid_index)};
+            const promotedRoles = {_script_json(list(PROMOTED_ROLES))};
+            const roleOrder = {_script_json(ROLE_ORDER)};
+            const nameSuffixes = ['jr', 'sr', 'ii', 'iii', 'iv'];
             const orcidStatus = {_script_json(orcid_status)};
             let browserWorks = {{}};
             let refreshingPIs = false;
@@ -682,13 +760,31 @@ def generate_single_html(cache, tracked_pis=None, orcid_index=None, orcid_status
                         const title = entry.querySelector("title").textContent.replace(/\\n/g, ' ').trim();
                         const abstract = entry.querySelector("summary").textContent.replace(/\\n/g, ' ').trim();
                         const published = entry.querySelector("published").textContent.substring(0, 10);
-                        const authors = Array.from(entry.querySelectorAll("author name")).map(n => n.textContent).join(', ');
+                        // Author order drives promotion, so index each ORCID as the list is read.
+                        const authorNames = [];
+                        const orcid_positions = {{}};
+                        entry.querySelectorAll('author').forEach(node => {{
+                            const name = (node.querySelector('name')?.textContent || '').trim();
+                            if (!name) return;
+                            const position = authorNames.push(name) - 1;
+                            Array.from(node.getElementsByTagName('*'))
+                                .filter(el => el.localName.toLowerCase() === 'orcid')
+                                .forEach(el => {{
+                                    const orcid = normalizeOrcid(el.textContent);
+                                    if (!orcid) return;
+                                    orcid_positions[orcid] = orcid_positions[orcid] || [];
+                                    if (!orcid_positions[orcid].includes(position)) orcid_positions[orcid].push(position);
+                                }});
+                        }});
+                        const authors = authorNames.join(', ');
                         
                         const doi = entry.getElementsByTagNameNS('http://arxiv.org/schemas/atom', 'doi')[0]?.textContent || '';
-                        const author_orcids = Array.from(entry.querySelectorAll('author')).flatMap(author =>
-                            Array.from(author.getElementsByTagName('*')).filter(el => el.localName.toLowerCase() === 'orcid')
-                                .map(el => normalizeOrcid(el.textContent)).filter(Boolean));
-                        newPapers.push({{id, title, abstract, published, authors, doi, author_orcids}});
+                        const comments = entry.getElementsByTagNameNS('http://arxiv.org/schemas/atom', 'comment')[0]?.textContent || '';
+                        const author_orcids = Object.keys(orcid_positions);
+                        // The Atom API carries no submitter, so live results judge corresponding
+                        // authorship from printed contact addresses only.
+                        newPapers.push({{id, title, abstract, published, authors, author_count: authorNames.length,
+                            doi, comments, author_orcids, orcid_positions}});
                     }});
                     
                     if(newPapers.length === 0) {{ alert("Query successful, but no papers matched those exact rules."); }}
@@ -805,12 +901,81 @@ def generate_single_html(cache, tracked_pis=None, orcid_index=None, orcid_status
                 return /^10\\.\\d{{4,9}}\\/\\S+$/.test(doi) ? doi : '';
             }}
 
+            function foldText(value) {{
+                return String(value ?? '').normalize('NFKD').replace(/[\\u0300-\\u036f]/g, '').toLowerCase();
+            }}
+
+            function nameParts(value) {{
+                const tokens = foldText(value).split(/[^a-z]+/).filter(Boolean);
+                while (tokens.length > 1 && nameSuffixes.includes(tokens[tokens.length - 1])) tokens.pop();
+                // A lone surname constrains nothing further: do not read it as a first initial.
+                return tokens.length ? [tokens[tokens.length - 1], tokens.length > 1 ? tokens[0][0] : ''] : ['', ''];
+            }}
+
+            // Surname plus first initial, only ever used to place a PI already identified by ORCID.
+            function namesMatch(personName, authorName) {{
+                const [surname, initial] = nameParts(personName);
+                const [otherSurname, otherInitial] = nameParts(authorName);
+                if (!surname || surname !== otherSurname) return false;
+                return !initial || !otherInitial || initial === otherInitial;
+            }}
+
+            function authorNamesOf(paper) {{
+                const names = String(paper.authors || '').split(',').map(name => name.trim()).filter(Boolean);
+                return !paper.author_count || names.length === paper.author_count ? names : [];
+            }}
+
+            function contactEmails(paper) {{
+                const text = [paper.submitter, paper.comments, paper.abstract].map(value => String(value || '')).join(' ');
+                return (text.match(/[A-Za-z0-9._%+\\-]+@[A-Za-z0-9.\\-]+\\.[A-Za-z]{{2,}}/g) || []).map(email => email.toLowerCase());
+            }}
+
+            // arXiv publishes no corresponding author: accept the submitter or a printed address.
+            function isCorresponding(paper, pi) {{
+                if (paper.submitter && namesMatch(pi.name, String(paper.submitter).replace(/<[^>]*>/g, ' '))) return true;
+                const known = String(pi.email || '').trim().toLowerCase();
+                const surname = nameParts(pi.name)[0];
+                return contactEmails(paper).some(email => {{
+                    if (known && email === known) return true;
+                    const local = foldText(email.split('@')[0]).replace(/[^a-z]/g, '');
+                    return surname.length >= 3 && local.includes(surname);
+                }});
+            }}
+
+            function authorRole(paper, pi) {{
+                const positions = (paper.orcid_positions || {{}})[pi.orcid];
+                let position = Array.isArray(positions) && positions.length ? Math.min(...positions) : null;
+                if (position === null) {{
+                    // ORCID public works can link a PI whose ORCID never reached arXiv.
+                    const found = authorNamesOf(paper).findIndex(name => namesMatch(pi.name, name));
+                    position = found >= 0 ? found : null;
+                }}
+                if (position === 0) return ['first', position];
+                if (position === 1) return ['second', position];
+                if (isCorresponding(paper, pi)) return ['corresponding', position];
+                const count = paper.author_count || authorNamesOf(paper).length;
+                if (position !== null && count && position === count - 1) return ['last', position];
+                return [position === null ? 'unknown' : 'co-author', position];
+            }}
+
+            function roleLabel(pi) {{
+                const role = pi.role === 'unknown' ? 'position unknown'
+                    : pi.role === 'co-author' ? 'co-author' : pi.role + ' author';
+                return pi.promoted ? `${{role}}, +${{pi.weight}}` : `${{role}}, no boost`;
+            }}
+
             function getPIMatches(paper) {{
-                const ids = new Set((paper.author_orcids || []).map(normalizeOrcid).filter(Boolean));
+                const ids = new Set(Object.keys(paper.orcid_positions || {{}}).map(normalizeOrcid).filter(Boolean));
+                (paper.author_orcids || []).map(normalizeOrcid).filter(Boolean).forEach(id => ids.add(id));
                 const keys = ['arxiv:' + normalizeArxiv(paper.id), 'doi:' + normalizeDoi(paper.doi)];
                 keys.forEach(key => (orcidIndex[key] || []).forEach(id => ids.add(id)));
                 return trackedPIs.filter(pi => pi.weight > 0 && pi.orcid && ids.has(pi.orcid))
-                    .sort((a, b) => b.weight - a.weight || a.name.localeCompare(b.name));
+                    .map(pi => {{
+                        const [role, position] = authorRole(paper, pi);
+                        return {{...pi, role, position, promoted: promotedRoles.includes(role)}};
+                    }})
+                    .sort((a, b) => (a.promoted === b.promoted ? 0 : a.promoted ? -1 : 1)
+                        || b.weight - a.weight || roleOrder[a.role] - roleOrder[b.role] || a.name.localeCompare(b.name));
             }}
 
             function readStored(key, fallback) {{
@@ -847,7 +1012,8 @@ def generate_single_html(cache, tracked_pis=None, orcid_index=None, orcid_status
                 document.getElementById('orcidStatus').textContent =
                     `${{resolved.length}} of ${{active.length}} active PIs have an ORCID; ${{active.length - resolved.length}} need an ID. ` +
                     `${{unavailable}} works records unavailable; ${{stale}} cached over 24 hours ago; ${{empty}} have no public work identifiers. ` +
-                    'Matches use exact arXiv/DOI links in public ORCID works or supplied author ORCIDs. Public records can be incomplete. Use Refresh ORCID works to update them.';
+                    'Matches use exact arXiv/DOI links in public ORCID works or supplied author ORCIDs, and only first, second or corresponding authors are promoted. ' +
+                    'Live queries carry no submitter, so corresponding authorship there rests on printed contact addresses. Public records can be incomplete. Use Refresh ORCID works to update them.';
             }}
 
             function appendPIRow(pi = {{name: '', orcid: '', priority: 'Medium'}}) {{
@@ -1054,14 +1220,15 @@ def generate_single_html(cache, tracked_pis=None, orcid_index=None, orcid_status
                     paper.dataset.matchCount = matchCount;
                     const record = currentDataset[Number(paper.dataset.originalIndex)];
                     const matches = getPIMatches(record);
-                    const piScore = matches.reduce((sum, pi) => sum + pi.weight, 0);
+                    const piScore = matches.reduce((sum, pi) => sum + (pi.promoted ? pi.weight : 0), 0);
                     paper.dataset.piScore = document.getElementById('orcidEnabled').checked ? piScore : 0;
                     record.keyword_matches = [...matchedUniqueKeywords];
                     record.keyword_score = matchCount;
-                    record.orcid_matches = matches.map(pi => ({{name: pi.name, orcid: pi.orcid, priority: pi.priority, weight: pi.weight}}));
+                    record.orcid_matches = matches.map(pi => ({{name: pi.name, orcid: pi.orcid, priority: pi.priority,
+                        weight: pi.weight, role: pi.role, position: pi.position, promoted: pi.promoted}}));
                     record.pi_score = piScore;
                     paper.querySelector('.orcid-matches').innerHTML = matches.length ? `PI score ${{piScore}}: ` + matches.map(pi =>
-                        `<a href="https://orcid.org/${{pi.orcid}}" target="_blank" rel="noopener">${{escapeHTML(pi.name)}}</a> (${{escapeHTML(pi.priority)}}, +${{pi.weight}})`
+                        `<span class="${{pi.promoted ? 'pi-promoted' : 'pi-muted'}}"><a href="https://orcid.org/${{pi.orcid}}" target="_blank" rel="noopener">${{escapeHTML(pi.name)}}</a> (${{escapeHTML(pi.priority)}}, ${{escapeHTML(roleLabel(pi))}})</span>`
                     ).join('; ') : '';
                     
                     const badge = paper.querySelector('.match-badge');
@@ -1195,7 +1362,19 @@ def main():
                                        refresh=args.refresh_orcid, offline=args.offline)
     for paper in paper_cache:
         paper['orcid_matches'] = match_paper(paper, people, index)
-        paper['pi_score'] = sum(pi['weight'] for pi in paper['orcid_matches'])
+    pending = [paper for paper in paper_cache if needs_submitter(paper)]
+    if pending and not args.offline:
+        print(f"Checking the submitter of {len(pending)} papers whose tracked PI is a plain co-author...")
+        if fetch_submitters(pending):
+            for paper in pending:
+                paper['orcid_matches'] = match_paper(paper, people, index)
+            save_cache(paper_cache)
+    for paper in paper_cache:
+        paper['pi_score'] = pi_score(paper['orcid_matches'])
+    matched = sum(1 for paper in paper_cache if paper['orcid_matches'])
+    promoted = sum(1 for paper in paper_cache if paper['pi_score'])
+    print(f"{promoted} of {matched} papers with a tracked PI are promoted "
+          f"({', '.join(PROMOTED_ROLES)} author); the rest rank on keywords alone.")
     generate_single_html(paper_cache, people, index, statuses, cache_days=args.cache_days)
 
 

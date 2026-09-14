@@ -4,7 +4,7 @@
   "source_range": "A4:F140",
   "verified_on": "2026-09-14",
   "priority_weights": {"Highest":3,"High":2,"Medium":1,"Skip (sim/theory)":0},
-  "matching": "Exact ORCID author IDs or exact arXiv/DOI identifiers from ORCID public works. Names are not used to match papers.",
+  "matching": "Exact ORCID author IDs or exact arXiv/DOI identifiers from ORCID public works. Names are not used to match papers. A match promotes a paper only when the PI is its first, second or corresponding author (the arXivRaw submitter, or a contact address printed in the record); any other co-author position adds no score.",
   "people": [
     {"name":"Stefano Marchesi","institution":"Clemson University","priority":"Medium","source_row":4,"orcid":"0000-0001-5544-0749","orcid_source":"https://pub.orcid.org/v3.0/0000-0001-5544-0749/record"},
     {"name":"Zoltán Haiman","institution":"Columbia University","priority":"Skip (sim/theory)","source_row":5,"orcid":"0000-0003-3633-5403","orcid_source":"https://pub.orcid.org/v3.0/0000-0003-3633-5403/record"},
