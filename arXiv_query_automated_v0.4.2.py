@@ -16,6 +16,19 @@ from arxiv_orcid import (
     needs_submitter, normalize_arxiv_id, normalize_orcid, pi_score,
 )
 
+def _launcher_action(path, script_name):
+    """Launchers bake in the script filename, so a version bump leaves old ones calling a file
+    that no longer exists. Rewrite those, and leave a launcher that already calls this script."""
+    if not os.path.exists(path):
+        return 'Creating'
+    try:
+        with open(path) as existing:
+            stale = f'"{script_name}"' not in existing.read()
+    except OSError:
+        return None
+    return 'Updating' if stale else None
+
+
 def create_launcher_shortcut(base_dir):
     """Automatically creates a .bat, .command, or .sh file to launch the script in the future."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -24,8 +37,9 @@ def create_launcher_shortcut(base_dir):
     # 1. WINDOWS
     if os.name == 'nt':  
         bat_path = os.path.join(script_dir, 'Run_arXiv_Query.bat')
-        if not os.path.exists(bat_path):
-            print(f"Creating Windows launcher at: {bat_path}")
+        action = _launcher_action(bat_path, script_name)
+        if action:
+            print(f"{action} Windows launcher at: {bat_path}")
             with open(bat_path, 'w') as f:
                 f.write("@echo off\n")
                 f.write("echo Running arXiv Query Script...\n")
@@ -36,8 +50,9 @@ def create_launcher_shortcut(base_dir):
     # 2. macOS
     elif sys.platform == 'darwin':  
         mac_path = os.path.join(script_dir, 'Run_arXiv_Query.command')
-        if not os.path.exists(mac_path):
-            print(f"Creating macOS launcher at: {mac_path}")
+        action = _launcher_action(mac_path, script_name)
+        if action:
+            print(f"{action} macOS launcher at: {mac_path}")
             with open(mac_path, 'w') as f:
                 f.write("#!/bin/bash\n")
                 f.write('echo "Running arXiv Query Script..."\n')
@@ -52,8 +67,9 @@ def create_launcher_shortcut(base_dir):
     # 3. LINUX
     else:  
         sh_path = os.path.join(script_dir, 'run_arxiv_query.sh')
-        if not os.path.exists(sh_path):
-            print(f"Creating Linux launcher at: {sh_path}")
+        action = _launcher_action(sh_path, script_name)
+        if action:
+            print(f"{action} Linux launcher at: {sh_path}")
             with open(sh_path, 'w') as f:
                 f.write("#!/bin/bash\n")
                 f.write('echo "Running arXiv Query Script..."\n')
@@ -872,6 +888,33 @@ def generate_single_html(cache, tracked_pis=None, orcid_index=None, orcid_status
             
             function escapeRegExp(string) {{ return string.replace(/[.*+?^${{}}()|[\\]\\\\]/g, '\\\\$&'); }}
 
+            // Irregular plurals worth knowing in this field; everything else follows the rules below.
+            const irregularStems = {{
+                nucleus: 'nucle(?:us|i)', nuclei: 'nucle(?:us|i)',
+                spectrum: 'spectr(?:um|a)', spectra: 'spectr(?:um|a)',
+                radius: 'radi(?:us|i)', radii: 'radi(?:us|i)',
+                analysis: 'analys(?:is|es)', analyses: 'analys(?:is|es)'
+            }};
+
+            // One keyword matches both its singular and plural: "black hole" catches "black holes".
+            function pluralPattern(word) {{
+                const lower = word.toLowerCase();
+                if (irregularStems[lower]) return irregularStems[lower];
+                if (/[^aeiou]ies$/.test(lower)) return escapeRegExp(word.slice(0, -3)) + '(?:y|ies)';
+                if (/(?:s|x|z|ch|sh)es$/.test(lower)) return escapeRegExp(word.slice(0, -2)) + '(?:es)?';
+                // Only drop a trailing "s" when a real stem is left, so "gas" never becomes "ga".
+                if (/[^su]s$/.test(lower) && !/is$/.test(lower) && word.length > 3) return escapeRegExp(word.slice(0, -1)) + 's?';
+                if (/[^aeiou]y$/.test(lower)) return escapeRegExp(word.slice(0, -1)) + '(?:y|ies)';
+                if (/(?:s|x|z|ch|sh)$/.test(lower)) return escapeRegExp(word) + '(?:es)?';
+                if (/o$/.test(lower)) return escapeRegExp(word) + '(?:e?s)?';
+                return escapeRegExp(word) + 's?';
+            }}
+
+            function keywordPattern(keyword) {{
+                const parts = /^(.*?)([a-z]+)$/i.exec(String(keyword || '').trim());
+                return parts ? escapeRegExp(parts[1]) + pluralPattern(parts[2]) : escapeRegExp(keyword);
+            }}
+
             function escapeHTML(value) {{
                 return String(value ?? '').replace(/[&<>"']/g, c => ({{'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}}[c]));
             }}
@@ -1192,7 +1235,7 @@ def generate_single_html(cache, tracked_pis=None, orcid_index=None, orcid_status
                 const sortedKw = activeKeywords.slice().sort((a, b) => b.length - a.length);
                 let regex = null;
                 if (sortedKw.length > 0) {{
-                    const patternString = "\\\\b(" + sortedKw.map(escapeRegExp).join('|') + ")\\\\b";
+                    const patternString = "\\\\b(?:" + sortedKw.map(kw => "(" + keywordPattern(kw) + ")").join('|') + ")\\\\b";
                     regex = new RegExp(patternString, 'gi');
                 }}
 
@@ -1208,7 +1251,9 @@ def generate_single_html(cache, tracked_pis=None, orcid_index=None, orcid_status
                     if (regex) {{
                         regex.lastIndex = 0;
                         for (const match of text.matchAll(regex)) {{
-                            matchedUniqueKeywords.add(match[0].toLowerCase());
+                            // Credit the keyword that matched, not the word form found in the text.
+                            const hit = match.findIndex((value, group) => group > 0 && value !== undefined);
+                            matchedUniqueKeywords.add((hit > 0 ? sortedKw[hit - 1] : match[0]).toLowerCase());
                             highlighted += escapeHTML(text.slice(end, match.index)) + `<span class="highlight">${{escapeHTML(match[0])}}</span>`;
                             end = match.index + match[0].length;
                         }}

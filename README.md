@@ -34,6 +34,9 @@ folder as your Python script:
 How it works:
 The script bakes your specific Python executable path, the script name, and your 
 chosen save directory right into the shortcut file. 
+Because the script name is baked in, a launcher left over from an earlier
+version is rewritten automatically on the next run. A launcher that already
+calls the current script is never touched, so edits you made to it survive.
 From now on, you NEVER have to use the terminal to run the tool. You simply 
 double-click the generated `.bat` or `.sh` file to fetch the latest papers.
 
@@ -86,6 +89,11 @@ file in any web browser (Chrome, Edge, Safari, Firefox). 
    - Use the "Keywords (primary ranking)" panel to add custom keywords.
    - When a keyword is added, the dashboard instantly scans all loaded abstracts.
    - Matches are highlighted in bright yellow/orange.
+   - Keywords match their plural and singular forms: "black hole" also
+     catches "black holes", "galaxy" catches "galaxies", and "active galactic
+     nuclei" catches "active galactic nucleus". Both forms in one abstract
+     still count as one keyword, and short words are never over-trimmed:
+     "gas" stays "gas" and also catches "gases".
    - Crucially, the papers are instantly re-sorted: papers with the highest 
      number of unique keyword matches are pushed to the very top of the list.
    - Your keywords are saved locally in your browser, so they will still be 
@@ -171,16 +179,16 @@ Keep `arxiv_orcid.py` and `tracked_pis.json` alongside the main Python script.
 All runtime code uses the Python standard library; no Excel packages are needed.
 
 Normal run (14-day initial display; 28-day retention):
-  python arXiv_query_automated_v0.4.1.py --dir "./arXiv_data"
+  python arXiv_query_automated_v0.4.2.py --dir "./arXiv_data"
 
 Choose a different initial display window (a saved browser choice takes precedence):
-  python arXiv_query_automated_v0.4.1.py --dir "./arXiv_data" --cache-days 21
+  python arXiv_query_automated_v0.4.2.py --dir "./arXiv_data" --cache-days 21
 
 Use a watchlist exported from the page:
-  python arXiv_query_automated_v0.4.1.py --dir "./arXiv_data" --pi-config "path/to/tracked_pis.json"
+  python arXiv_query_automated_v0.4.2.py --dir "./arXiv_data" --pi-config "path/to/tracked_pis.json"
 
 Import names/priorities from an updated tracker (existing verified names retain IDs):
-  python arXiv_query_automated_v0.4.1.py --dir "./arXiv_data" --pi-tracker "path/to/tracker.xlsx"
+  python arXiv_query_automated_v0.4.2.py --dir "./arXiv_data" --pi-tracker "path/to/tracker.xlsx"
 The tracker must contain `PI (contact)` and `Priority` headers. Optional ORCID and
 Email columns are accepted, with one PI per row when either is supplied. An email
 is never used to identify a PI, only to confirm a corresponding author already
@@ -190,8 +198,8 @@ settings are saved as `pi_settings.json` in the data folder for later shortcut r
 After an import, use the page's reset button to replace an older browser watchlist.
 
 Force an ORCID refresh, or rebuild from existing caches without network access:
-  python arXiv_query_automated_v0.4.1.py --dir "./arXiv_data" --refresh-orcid
-  python arXiv_query_automated_v0.4.1.py --dir "./arXiv_data" --offline
+  python arXiv_query_automated_v0.4.2.py --dir "./arXiv_data" --refresh-orcid
+  python arXiv_query_automated_v0.4.2.py --dir "./arXiv_data" --offline
 
 If ORCID requires authentication, the Python fetcher accepts an optional
 `ORCID_ACCESS_TOKEN` environment variable. It is never embedded in the HTML.
